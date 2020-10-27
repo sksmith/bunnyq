@@ -104,8 +104,6 @@ type Consumer struct {
 	deleteUnused bool
 	exclusive    bool
 	noWait       bool
-	autoAck      bool
-	noLocal      bool
 }
 
 type Address struct {
@@ -140,8 +138,6 @@ func NewConsumer(ctx context.Context, queue string, addr Address, done chan os.S
 		deleteUnused: cc.deleteUnused,
 		exclusive:    cc.exclusive,
 		noWait:       cc.noWait,
-		autoAck:      cc.autoAck,
-		noLocal:      cc.noLocal,
 	}
 	client.wg.Add(cc.threads)
 
@@ -223,7 +219,32 @@ func (c *Consumer) changeConnection(connection *amqp.Connection, channel *amqp.C
 	c.channel.NotifyClose(c.notifyClose)
 }
 
-func (c *Consumer) Stream(cancelCtx context.Context, handler func(delivery amqp.Delivery)) error {
+type StreamOption func(s *streamOptions)
+
+type streamOptions struct {
+	autoAck bool
+	exclusive bool
+	noLocal bool
+	noWait bool
+}
+
+func StreamOpAutoAck(s *streamOptions) {
+	s.autoAck = true
+}
+
+func StreamOpExclusive(s *streamOptions) {
+	s.exclusive = true
+}
+
+func StreamOpNoLocal(s *streamOptions) {
+	s.noLocal = true
+}
+
+func StreamOpNoWait(s *streamOptions) {
+	s.noWait = true
+}
+
+func (c *Consumer) Stream(cancelCtx context.Context, handler func(delivery amqp.Delivery), options ...StreamOption) error {
 	for {
 		if c.isConnected {
 			break
@@ -238,14 +259,19 @@ func (c *Consumer) Stream(cancelCtx context.Context, handler func(delivery amqp.
 
 	var connectionDropped bool
 
+	so := &streamOptions{}
+	for _, option := range options {
+		option(so)
+	}
+
 	for i := 1; i <= c.threads; i++ {
 		deliveryChannel, err := c.channel.Consume(
 			c.queue,
 			consumerName(i), // Consumer
-			c.autoAck,       // Auto-Ack
-			c.exclusive,     // Exclusive
-			c.noLocal,       // No-local
-			c.noWait,        // No-Wait
+			so.autoAck,       // Auto-Ack
+			so.exclusive,     // Exclusive
+			so.noLocal,       // No-local
+			so.noWait,        // No-Wait
 			nil,             // Args
 		)
 		if err != nil {
