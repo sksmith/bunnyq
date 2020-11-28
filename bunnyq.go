@@ -287,13 +287,25 @@ func StreamOpConsumer(name string) func(s *streamOptions) {
 	}
 }
 
-func (c *BunnyQ) Stream(cancelCtx context.Context, queue string, handler func(delivery amqp.Delivery), options ...StreamOption) error {
+func (c *BunnyQ) awaitConnection(ctx context.Context) {
+	logged := false
 	for {
 		if c.isConnected {
+			if logged {
+				c.logger.Log(ctx, LogLevelWarn, "connection to rabbitmq re-established", nil)
+			}
 			break
 		}
-		time.Sleep(1 * time.Second)
+		if !logged {
+			c.logger.Log(ctx, LogLevelWarn, "awaiting connection to rabbitmq...", nil)
+			logged = true
+		}
+		time.Sleep(50 * time.Millisecond)
 	}
+}
+
+func (c *BunnyQ) Stream(ctx context.Context, queue string, handler func(delivery amqp.Delivery), options ...StreamOption) error {
+	c.awaitConnection(ctx)
 
 	so := &streamOptions{
 		prefetchCount: 1,
@@ -329,7 +341,7 @@ func (c *BunnyQ) Stream(cancelCtx context.Context, queue string, handler func(de
 			defer c.wg.Done()
 			for {
 				select {
-				case <-cancelCtx.Done():
+				case <-ctx.Done():
 					return
 				case delivery, ok := <-deliveryChannel:
 					if !ok {
@@ -381,6 +393,7 @@ func PublishOpContentType(contentType string) func(p *publishOptions) {
 }
 
 func (c *BunnyQ) Publish(ctx context.Context, exchange string, body []byte, options ...PublishOption) error {
+	c.awaitConnection(ctx)
 	err := c.channel.Qos(1, 0, false)
 	if err != nil {
 		return err
