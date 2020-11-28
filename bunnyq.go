@@ -3,11 +3,12 @@ package bunnyq
 import (
 	"context"
 	"fmt"
-	"github.com/pkg/errors"
-	"github.com/streadway/amqp"
 	"os"
 	"sync"
 	"time"
+
+	"github.com/pkg/errors"
+	"github.com/streadway/amqp"
 )
 
 type Logger interface {
@@ -42,11 +43,11 @@ const (
 type Option func(*config)
 
 type config struct {
-	logger       Logger
-	threads      int
-	autoAck      bool
-	noLocal      bool
-	queues       map[string]queue
+	logger  Logger
+	threads int
+	autoAck bool
+	noLocal bool
+	queues  map[string]queue
 }
 
 func Queue(name string, options ...QueueOption) func(cc *config) {
@@ -83,18 +84,17 @@ func NoLocal(cc *config) {
 }
 
 type BunnyQ struct {
-	logger       Logger
-	address      Address
-	connection   *amqp.Connection
-	channel      *amqp.Channel
-	queues       map[string]queue
-	done         chan os.Signal
-	notifyClose  chan *amqp.Error
-	isConnected  bool
-	alive        bool
-	threads      int
-	wg           *sync.WaitGroup
-
+	logger      Logger
+	address     Address
+	connection  *amqp.Connection
+	channel     *amqp.Channel
+	queues      map[string]queue
+	done        chan os.Signal
+	notifyClose chan *amqp.Error
+	isConnected bool
+	alive       bool
+	threads     int
+	wg          *sync.WaitGroup
 }
 
 func Durable(q *queue) {
@@ -116,7 +116,7 @@ func NoWait(q *queue) {
 type QueueOption func(*queue)
 
 type queue struct {
-	name string
+	name         string
 	durable      bool
 	deleteUnused bool
 	exclusive    bool
@@ -145,12 +145,12 @@ func New(ctx context.Context, addr Address, done chan os.Signal, options ...Opti
 		option(cc)
 	}
 	client := BunnyQ{
-		logger:       cc.logger,
-		threads:      cc.threads,
-		done:         done,
-		alive:        true,
-		wg:           &sync.WaitGroup{},
-		queues:       cc.queues,
+		logger:  cc.logger,
+		threads: cc.threads,
+		done:    done,
+		alive:   true,
+		wg:      &sync.WaitGroup{},
+		queues:  cc.queues,
 	}
 	client.wg.Add(cc.threads)
 
@@ -214,7 +214,7 @@ func (c *BunnyQ) connect(ctx context.Context, addr string) bool {
 			q.deleteUnused, // Delete when unused
 			q.exclusive,    // Exclusive
 			q.noWait,       // No-wait
-			nil,       // Arguments
+			nil,            // Arguments
 		)
 	}
 
@@ -238,13 +238,14 @@ func (c *BunnyQ) changeConnection(connection *amqp.Connection, channel *amqp.Cha
 type StreamOption func(s *streamOptions)
 
 type streamOptions struct {
-	autoAck bool
-	exclusive bool
-	noLocal bool
-	noWait bool
+	autoAck       bool
+	exclusive     bool
+	noLocal       bool
+	noWait        bool
 	prefetchCount int
-	prefetchSize int
-	global bool
+	prefetchSize  int
+	global        bool
+	consumerName  string
 }
 
 func StreamOpAutoAck(s *streamOptions) {
@@ -269,7 +270,7 @@ func StreamOpPrefetchCount(count int) func(s *streamOptions) {
 	}
 }
 
-func StreamOpPrefetchSize(size int) func (s *streamOptions) {
+func StreamOpPrefetchSize(size int) func(s *streamOptions) {
 	return func(s *streamOptions) {
 		s.prefetchSize = size
 	}
@@ -277,6 +278,12 @@ func StreamOpPrefetchSize(size int) func (s *streamOptions) {
 
 func StreamOpGlobal(s *streamOptions) {
 	s.global = true
+}
+
+func StreamOpConsumer(name string) func(s *streamOptions) {
+	return func(s *streamOptions) {
+		s.consumerName = name
+	}
 }
 
 func (c *BunnyQ) Stream(cancelCtx context.Context, queue string, handler func(delivery amqp.Delivery), options ...StreamOption) error {
@@ -304,12 +311,12 @@ func (c *BunnyQ) Stream(cancelCtx context.Context, queue string, handler func(de
 	for i := 1; i <= c.threads; i++ {
 		deliveryChannel, err := c.channel.Consume(
 			queue,
-			consumerName(i), // BunnyQ
-			so.autoAck,      // Auto-Ack
-			so.exclusive,    // Exclusive
-			so.noLocal,      // No-local
-			so.noWait,       // No-Wait
-			nil,        // Args
+			consumerName(so.consumerName, i), // BunnyQ
+			so.autoAck,                       // Auto-Ack
+			so.exclusive,                     // Exclusive
+			so.noLocal,                       // No-local
+			so.noWait,                        // No-Wait
+			nil,                              // Args
 		)
 		if err != nil {
 			return err
@@ -344,9 +351,9 @@ func (c *BunnyQ) Stream(cancelCtx context.Context, queue string, handler func(de
 type PublishOption func(p *publishOptions)
 
 type publishOptions struct {
-	routingKey string
-	mandatory bool
-	immediate bool
+	routingKey  string
+	mandatory   bool
+	immediate   bool
 	contentType string
 }
 
@@ -389,7 +396,7 @@ func (c *BunnyQ) Publish(ctx context.Context, exchange string, body []byte, opti
 		po.immediate,
 		amqp.Publishing{
 			ContentType: po.contentType,
-			Body: body,
+			Body:        body,
 		})
 	if err != nil {
 		return errors.WithMessage(err, "failed to publish to channel")
@@ -425,6 +432,9 @@ func (c *BunnyQ) Close() error {
 	return nil
 }
 
-func consumerName(i int) string {
-	return fmt.Sprintf("consumer-%v", i)
+func consumerName(name string, i int) string {
+	if name == "" {
+		name = "consumer"
+	}
+	return fmt.Sprintf("%s-%v", name, i)
 }
