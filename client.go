@@ -2,7 +2,7 @@ package bunnyq
 
 import (
 	"context"
-	"errors"
+	"github.com/pkg/errors"
 	"fmt"
 	"github.com/streadway/amqp"
 	"os"
@@ -88,7 +88,7 @@ func NoLocal(cc *consumerConfig) {
 	cc.noLocal = true
 }
 
-type Consumer struct {
+type BunnyQ struct {
 	logger       Logger
 	address      Address
 	connection   *amqp.Connection
@@ -120,14 +120,14 @@ func (a *Address) string() string {
 // New is a constructor that takes address, push and listen queue names, logger, and a channel that will notify rabbitmq
 // client on server shutdown. We calculate the number of threads, create the client, and start the connection process.
 // Connect method connects to the rabbitmq server and creates push/listen channels if they don't exist.
-func NewConsumer(ctx context.Context, queue string, addr Address, done chan os.Signal, options ...ConsumerOption) *Consumer {
+func New(ctx context.Context, queue string, addr Address, done chan os.Signal, options ...ConsumerOption) *BunnyQ {
 	cc := &consumerConfig{
 		threads: 1,
 	}
 	for _, option := range options {
 		option(cc)
 	}
-	client := Consumer{
+	client := BunnyQ{
 		logger:       cc.logger,
 		threads:      cc.threads,
 		done:         done,
@@ -146,7 +146,7 @@ func NewConsumer(ctx context.Context, queue string, addr Address, done chan os.S
 }
 
 // handleReconnect will wait for a connection error on notifyClose, and then continuously attempt to reconnect.
-func (c *Consumer) handleReconnect(ctx context.Context, addr Address) {
+func (c *BunnyQ) handleReconnect(ctx context.Context, addr Address) {
 	for c.alive {
 		c.isConnected = false
 		t := time.Now()
@@ -174,12 +174,12 @@ func (c *Consumer) handleReconnect(ctx context.Context, addr Address) {
 	}
 }
 
-func (c *Consumer) logError(ctx context.Context, message string, err error) {
+func (c *BunnyQ) logError(ctx context.Context, message string, err error) {
 	c.logger.Log(ctx, LogLevelError, message, map[string]interface{}{"error": err})
 }
 
 // connect will make a single attempt to connect to RabbitMq. It returns the success of the attempt.
-func (c *Consumer) connect(ctx context.Context, addr string) bool {
+func (c *BunnyQ) connect(ctx context.Context, addr string) bool {
 	conn, err := amqp.Dial(addr)
 	if err != nil {
 		c.logError(ctx, "failed to dial rabbitMQ server", err)
@@ -200,7 +200,7 @@ func (c *Consumer) connect(ctx context.Context, addr string) bool {
 		c.deleteUnused, // Delete when unused
 		c.exclusive,    // Exclusive
 		c.noWait,       // No-wait
-		nil,            // Arguments
+		nil,       // Arguments
 	)
 	if err != nil {
 		c.logError(ctx, "failed to declare listen queue", err)
@@ -212,7 +212,7 @@ func (c *Consumer) connect(ctx context.Context, addr string) bool {
 }
 
 // changeConnection takes a new connection to the queue, and updates the channel listeners to reflect this.
-func (c *Consumer) changeConnection(connection *amqp.Connection, channel *amqp.Channel) {
+func (c *BunnyQ) changeConnection(connection *amqp.Connection, channel *amqp.Channel) {
 	c.connection = connection
 	c.channel = channel
 	c.notifyClose = make(chan *amqp.Error)
@@ -244,7 +244,7 @@ func StreamOpNoWait(s *streamOptions) {
 	s.noWait = true
 }
 
-func (c *Consumer) Stream(cancelCtx context.Context, handler func(delivery amqp.Delivery), options ...StreamOption) error {
+func (c *BunnyQ) Stream(cancelCtx context.Context, handler func(delivery amqp.Delivery), options ...StreamOption) error {
 	for {
 		if c.isConnected {
 			break
@@ -267,7 +267,7 @@ func (c *Consumer) Stream(cancelCtx context.Context, handler func(delivery amqp.
 	for i := 1; i <= c.threads; i++ {
 		deliveryChannel, err := c.channel.Consume(
 			c.queue,
-			consumerName(i), // Consumer
+			consumerName(i), // BunnyQ
 			so.autoAck,       // Auto-Ack
 			so.exclusive,     // Exclusive
 			so.noLocal,       // No-local
@@ -304,7 +304,55 @@ func (c *Consumer) Stream(cancelCtx context.Context, handler func(delivery amqp.
 	return nil
 }
 
-func (c *Consumer) Close() error {
+type PublishOption func(p *publishOptions)
+
+type publishOptions struct {
+	routingKey string
+	mandatory bool
+	immediate bool
+}
+
+func PublishOpRoutingKey(key string) func(p *publishOptions) {
+	return func(p *publishOptions) {
+		p.routingKey = key
+	}
+}
+
+func PublishOpMandatory(s *publishOptions) {
+	s.mandatory = true
+}
+
+func PublishOpImmediate(s *publishOptions) {
+	s.immediate = true
+}
+
+func (c *BunnyQ) Publish(ctx context.Context, exchange string, body string, options ...PublishOption) error {
+	err := c.channel.Qos(1, 0, false)
+	if err != nil {
+		return err
+	}
+
+	po := &publishOptions{}
+	for _, option := range options {
+		option(po)
+	}
+
+	err = c.channel.Publish(exchange,
+		po.routingKey,
+		po.mandatory,
+		po.immediate,
+		amqp.Publishing{
+			ContentType: "application/json",
+			Body: []byte(body),
+		})
+	if err != nil {
+		return errors.WithMessage(err, "failed to publish to channel")
+	}
+
+	return nil
+}
+
+func (c *BunnyQ) Close() error {
 	if !c.isConnected {
 		return nil
 	}
