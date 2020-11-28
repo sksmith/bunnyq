@@ -95,6 +95,7 @@ type BunnyQ struct {
 	alive       bool
 	threads     int
 	wg          *sync.WaitGroup
+	consumers   []string
 }
 
 func Durable(q *queue) {
@@ -296,11 +297,13 @@ func (c *BunnyQ) Stream(cancelCtx context.Context, queue string, handler func(de
 
 	so := &streamOptions{
 		prefetchCount: 1,
+		consumerName:  "consumer",
 	}
 	for _, option := range options {
 		option(so)
 	}
 
+	c.consumers = append(c.consumers, so.consumerName)
 	err := c.channel.Qos(so.prefetchCount, so.prefetchSize, so.global)
 	if err != nil {
 		return err
@@ -412,13 +415,17 @@ func (c *BunnyQ) Close() error {
 	c.alive = false
 	fmt.Println("Waiting for current messages to be processed...")
 	c.wg.Wait()
-	for i := 1; i <= c.threads; i++ {
-		fmt.Println("Closing consumer: ", i)
-		err := c.channel.Cancel(consumerName(i), false)
-		if err != nil {
-			return fmt.Errorf("error canceling consumer %s: %v", consumerName(i), err)
+
+	for _, consumer := range c.consumers {
+		for i := 1; i <= c.threads; i++ {
+			fmt.Println("Closing consumer: ", i)
+			err := c.channel.Cancel(consumerName(consumer, i), false)
+			if err != nil {
+				return fmt.Errorf("error canceling consumer %s: %v", consumerName(consumer, i), err)
+			}
 		}
 	}
+
 	err := c.channel.Close()
 	if err != nil {
 		return err
@@ -433,8 +440,5 @@ func (c *BunnyQ) Close() error {
 }
 
 func consumerName(name string, i int) string {
-	if name == "" {
-		name = "consumer"
-	}
 	return fmt.Sprintf("%s-%v", name, i)
 }
