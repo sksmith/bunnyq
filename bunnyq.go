@@ -150,7 +150,7 @@ func (c *BunnyQ) handleReconnect(ctx context.Context, addr Address) {
 	for c.alive {
 		c.isConnected = false
 		t := time.Now()
-		c.logger.Log(ctx, LogLevelInfo, "Attempting to connect to rabbitMQ", map[string]interface{}{"addr": addr})
+		c.logger.Log(ctx, LogLevelInfo, "connecting to rabbitmq...", nil)
 		var retryCount int
 		for !c.connect(ctx, addr.string()) {
 			if !c.alive {
