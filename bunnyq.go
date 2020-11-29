@@ -2,8 +2,8 @@ package bunnyq
 
 import (
 	"context"
-	"github.com/pkg/errors"
 	"fmt"
+	"github.com/pkg/errors"
 	"github.com/streadway/amqp"
 	"os"
 	"sync"
@@ -39,9 +39,9 @@ const (
 	reconnectDelay = 5 * time.Second
 )
 
-type ConsumerOption func(*consumerConfig)
+type Option func(*config)
 
-type consumerConfig struct {
+type config struct {
 	logger       Logger
 	threads      int
 	durable      bool
@@ -52,39 +52,39 @@ type consumerConfig struct {
 	noLocal      bool
 }
 
-func Threads(t int) func(cc *consumerConfig) {
-	return func(cc *consumerConfig) {
+func Threads(t int) func(cc *config) {
+	return func(cc *config) {
 		cc.threads = t
 	}
 }
 
-func LogHandler(l Logger) func(cc *consumerConfig) {
-	return func(cc *consumerConfig) {
+func LogHandler(l Logger) func(cc *config) {
+	return func(cc *config) {
 		cc.logger = l
 	}
 }
 
-func Durable(cc *consumerConfig) {
+func Durable(cc *config) {
 	cc.durable = true
 }
 
-func DeleteUnused(cc *consumerConfig) {
+func DeleteUnused(cc *config) {
 	cc.deleteUnused = true
 }
 
-func Exclusive(cc *consumerConfig) {
+func Exclusive(cc *config) {
 	cc.exclusive = true
 }
 
-func NoWait(cc *consumerConfig) {
+func NoWait(cc *config) {
 	cc.noWait = true
 }
 
-func AutoAck(cc *consumerConfig) {
+func AutoAck(cc *config) {
 	cc.autoAck = true
 }
 
-func NoLocal(cc *consumerConfig) {
+func NoLocal(cc *config) {
 	cc.noLocal = true
 }
 
@@ -120,8 +120,8 @@ func (a *Address) string() string {
 // New is a constructor that takes address, push and listen queue names, logger, and a channel that will notify rabbitmq
 // client on server shutdown. We calculate the number of threads, create the client, and start the connection process.
 // Connect method connects to the rabbitmq server and creates push/listen channels if they don't exist.
-func New(ctx context.Context, queue string, addr Address, done chan os.Signal, options ...ConsumerOption) *BunnyQ {
-	cc := &consumerConfig{
+func New(ctx context.Context, queue string, addr Address, done chan os.Signal, options ...Option) *BunnyQ {
+	cc := &config{
 		threads: 1,
 	}
 	for _, option := range options {
