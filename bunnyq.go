@@ -326,7 +326,7 @@ func PublishOpImmediate(s *publishOptions) {
 	s.immediate = true
 }
 
-func (c *BunnyQ) Publish(ctx context.Context, exchange string, body string, options ...PublishOption) error {
+func (c *BunnyQ) Publish(ctx context.Context, exchange string, body []byte, options ...PublishOption) error {
 	err := c.channel.Qos(1, 0, false)
 	if err != nil {
 		return err
@@ -343,7 +343,7 @@ func (c *BunnyQ) Publish(ctx context.Context, exchange string, body string, opti
 		po.immediate,
 		amqp.Publishing{
 			ContentType: "application/json",
-			Body: []byte(body),
+			Body: body,
 		})
 	if err != nil {
 		return errors.WithMessage(err, "failed to publish to channel")
