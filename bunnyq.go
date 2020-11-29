@@ -44,12 +44,22 @@ type Option func(*config)
 type config struct {
 	logger       Logger
 	threads      int
-	durable      bool
-	deleteUnused bool
-	exclusive    bool
-	noWait       bool
 	autoAck      bool
 	noLocal      bool
+	queues       map[string]queue
+}
+
+func Queue(name string, options ...QueueOption) func(cc *config) {
+	q := queue{name: name}
+	for _, option := range options {
+		option(&q)
+	}
+	return func(cc *config) {
+		if cc.queues == nil {
+			cc.queues = make(map[string]queue)
+		}
+		cc.queues[q.name] = q
+	}
 }
 
 func Threads(t int) func(cc *config) {
@@ -62,22 +72,6 @@ func LogHandler(l Logger) func(cc *config) {
 	return func(cc *config) {
 		cc.logger = l
 	}
-}
-
-func Durable(cc *config) {
-	cc.durable = true
-}
-
-func DeleteUnused(cc *config) {
-	cc.deleteUnused = true
-}
-
-func Exclusive(cc *config) {
-	cc.exclusive = true
-}
-
-func NoWait(cc *config) {
-	cc.noWait = true
 }
 
 func AutoAck(cc *config) {
@@ -93,13 +87,36 @@ type BunnyQ struct {
 	address      Address
 	connection   *amqp.Connection
 	channel      *amqp.Channel
-	queue        string
+	queues       map[string]queue
 	done         chan os.Signal
 	notifyClose  chan *amqp.Error
 	isConnected  bool
 	alive        bool
 	threads      int
 	wg           *sync.WaitGroup
+
+}
+
+func Durable(q *queue) {
+	q.durable = true
+}
+
+func DeleteUnused(q *queue) {
+	q.deleteUnused = true
+}
+
+func Exclusive(q *queue) {
+	q.exclusive = true
+}
+
+func NoWait(q *queue) {
+	q.noWait = true
+}
+
+type QueueOption func(*queue)
+
+type queue struct {
+	name string
 	durable      bool
 	deleteUnused bool
 	exclusive    bool
@@ -120,7 +137,7 @@ func (a *Address) string() string {
 // New is a constructor that takes address, push and listen queue names, logger, and a channel that will notify rabbitmq
 // client on server shutdown. We calculate the number of threads, create the client, and start the connection process.
 // Connect method connects to the rabbitmq server and creates push/listen channels if they don't exist.
-func New(ctx context.Context, queue string, addr Address, done chan os.Signal, options ...Option) *BunnyQ {
+func New(ctx context.Context, addr Address, done chan os.Signal, options ...Option) *BunnyQ {
 	cc := &config{
 		threads: 1,
 	}
@@ -132,12 +149,8 @@ func New(ctx context.Context, queue string, addr Address, done chan os.Signal, o
 		threads:      cc.threads,
 		done:         done,
 		alive:        true,
-		queue:        queue,
 		wg:           &sync.WaitGroup{},
-		durable:      cc.durable,
-		deleteUnused: cc.deleteUnused,
-		exclusive:    cc.exclusive,
-		noWait:       cc.noWait,
+		queues:       cc.queues,
 	}
 	client.wg.Add(cc.threads)
 
@@ -160,11 +173,11 @@ func (c *BunnyQ) handleReconnect(ctx context.Context, addr Address) {
 			case <-c.done:
 				return
 			case <-time.After(reconnectDelay + time.Duration(retryCount)*time.Second):
-				c.logger.Log(ctx, LogLevelWarn, "disconnected from rabbitMQ and failed to connect", nil)
+				c.logger.Log(ctx, LogLevelWarn, "disconnected from rabbitmq and failed to connect", nil)
 				retryCount++
 			}
 		}
-		c.logger.Log(ctx, LogLevelInfo, "Connected to rabbitMQ",
+		c.logger.Log(ctx, LogLevelInfo, "connected to rabbitmq",
 			map[string]interface{}{"duration": time.Since(t).Milliseconds()})
 		select {
 		case <-c.done:
@@ -194,14 +207,17 @@ func (c *BunnyQ) connect(ctx context.Context, addr string) bool {
 	if err != nil {
 		c.logger.Log(ctx, LogLevelWarn, "failed to set channel to confirm", nil)
 	}
-	_, err = ch.QueueDeclare(
-		c.queue,
-		c.durable,      // Durable
-		c.deleteUnused, // Delete when unused
-		c.exclusive,    // Exclusive
-		c.noWait,       // No-wait
-		nil,       // Arguments
-	)
+	for name, q := range c.queues {
+		_, err = ch.QueueDeclare(
+			name,
+			q.durable,      // Durable
+			q.deleteUnused, // Delete when unused
+			q.exclusive,    // Exclusive
+			q.noWait,       // No-wait
+			nil,       // Arguments
+		)
+	}
+
 	if err != nil {
 		c.logError(ctx, "failed to declare listen queue", err)
 		return false
@@ -226,6 +242,9 @@ type streamOptions struct {
 	exclusive bool
 	noLocal bool
 	noWait bool
+	prefetchCount int
+	prefetchSize int
+	global bool
 }
 
 func StreamOpAutoAck(s *streamOptions) {
@@ -244,7 +263,23 @@ func StreamOpNoWait(s *streamOptions) {
 	s.noWait = true
 }
 
-func (c *BunnyQ) Stream(cancelCtx context.Context, handler func(delivery amqp.Delivery), options ...StreamOption) error {
+func StreamOpPrefetchCount(count int) func(s *streamOptions) {
+	return func(s *streamOptions) {
+		s.prefetchCount = count
+	}
+}
+
+func StreamOpPrefetchSize(size int) func (s *streamOptions) {
+	return func(s *streamOptions) {
+		s.prefetchSize = size
+	}
+}
+
+func StreamOpGlobal(s *streamOptions) {
+	s.global = true
+}
+
+func (c *BunnyQ) Stream(cancelCtx context.Context, queue string, handler func(delivery amqp.Delivery), options ...StreamOption) error {
 	for {
 		if c.isConnected {
 			break
@@ -252,27 +287,29 @@ func (c *BunnyQ) Stream(cancelCtx context.Context, handler func(delivery amqp.De
 		time.Sleep(1 * time.Second)
 	}
 
-	err := c.channel.Qos(1, 0, false)
+	so := &streamOptions{
+		prefetchCount: 1,
+	}
+	for _, option := range options {
+		option(so)
+	}
+
+	err := c.channel.Qos(so.prefetchCount, so.prefetchSize, so.global)
 	if err != nil {
 		return err
 	}
 
 	var connectionDropped bool
 
-	so := &streamOptions{}
-	for _, option := range options {
-		option(so)
-	}
-
 	for i := 1; i <= c.threads; i++ {
 		deliveryChannel, err := c.channel.Consume(
-			c.queue,
+			queue,
 			consumerName(i), // BunnyQ
-			so.autoAck,       // Auto-Ack
-			so.exclusive,     // Exclusive
-			so.noLocal,       // No-local
-			so.noWait,        // No-Wait
-			nil,             // Args
+			so.autoAck,      // Auto-Ack
+			so.exclusive,    // Exclusive
+			so.noLocal,      // No-local
+			so.noWait,       // No-Wait
+			nil,        // Args
 		)
 		if err != nil {
 			return err
@@ -310,6 +347,7 @@ type publishOptions struct {
 	routingKey string
 	mandatory bool
 	immediate bool
+	contentType string
 }
 
 func PublishOpRoutingKey(key string) func(p *publishOptions) {
@@ -326,13 +364,21 @@ func PublishOpImmediate(s *publishOptions) {
 	s.immediate = true
 }
 
+func PublishOpContentType(contentType string) func(p *publishOptions) {
+	return func(p *publishOptions) {
+		p.contentType = contentType
+	}
+}
+
 func (c *BunnyQ) Publish(ctx context.Context, exchange string, body []byte, options ...PublishOption) error {
 	err := c.channel.Qos(1, 0, false)
 	if err != nil {
 		return err
 	}
 
-	po := &publishOptions{}
+	po := &publishOptions{
+		contentType: "application/json",
+	}
 	for _, option := range options {
 		option(po)
 	}
@@ -342,7 +388,7 @@ func (c *BunnyQ) Publish(ctx context.Context, exchange string, body []byte, opti
 		po.mandatory,
 		po.immediate,
 		amqp.Publishing{
-			ContentType: "application/json",
+			ContentType: po.contentType,
 			Body: body,
 		})
 	if err != nil {
